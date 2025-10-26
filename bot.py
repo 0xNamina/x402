@@ -6,8 +6,8 @@ Langsung jalan otomatis, cukup tekan /start!
 import asyncio
 import aiohttp
 import os
-from telegram import Bot
-from telegram.ext import Application, CommandHandler, ContextTypes, Update
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from datetime import datetime
 import logging
 import json
