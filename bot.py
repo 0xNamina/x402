@@ -1,5 +1,5 @@
 """
-X402 Token Scanner Bot - ULTIMATE VERSION
+X402 Token Scanner Bot - ULTIMATE VERSION (FIXED)
 Triple Scanner: x402 Mesh API + DexScreener + Security
 """
 
@@ -27,20 +27,13 @@ BASESCAN_API_KEY = os.getenv("BASESCAN_API_KEY", "")
 
 # APIs
 X402_TRENDING_API = "https://mesh.heurist.xyz/x402/agents/trending-tokens"
-X402_SEARCH_API = "https://mesh.heurist.xyz/x402/agents/search-token"
-X402_FIND_API = "https://mesh.heurist.xyz/x402/agents/find-token"
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex"
 
 # Tracking
 bot_started = False
 scanned_tokens = set()
 last_scan_time = {}
-scan_stats = {
-    "x402_scans": 0,
-    "dex_scans": 0,
-    "alerts_sent": 0,
-    "tokens_analyzed": 0
-}
+scan_stats = {"x402_scans": 0, "dex_scans": 0, "alerts_sent": 0, "tokens_analyzed": 0}
 
 # ===== SECURITY CHECKS =====
 async def check_honeypot(session, contract_address):
@@ -92,38 +85,6 @@ async def check_liquidity_dex(session, contract_address):
         logger.error(f"Liquidity check error: {e}")
         return None, "⚠️ Failed", None
 
-async def get_token_info_dex(session, contract_address):
-    """Get detailed token info from DexScreener"""
-    try:
-        url = f"{DEXSCREENER_API}/tokens/{contract_address}"
-        async with session.get(url, timeout=10) as response:
-            if response.status != 200:
-                return None
-            
-            data = await response.json()
-            pairs = [p for p in data.get("pairs", []) if p.get("chainId") == "base"]
-            
-            if not pairs:
-                return None
-            
-            main_pair = max(pairs, key=lambda x: float(x.get("liquidity", {}).get("usd", 0)))
-            
-            return {
-                "name": main_pair.get("baseToken", {}).get("name", "Unknown"),
-                "symbol": main_pair.get("baseToken", {}).get("symbol", "???"),
-                "price": float(main_pair.get("priceUsd", 0)),
-                "mcap": float(main_pair.get("marketCap", 0)),
-                "liquidity": float(main_pair.get("liquidity", {}).get("usd", 0)),
-                "volume_24h": float(main_pair.get("volume", {}).get("h24", 0)),
-                "price_change_24h": float(main_pair.get("priceChange", {}).get("h24", 0)),
-                "created_at": main_pair.get("pairCreatedAt", 0),
-                "dex_url": main_pair.get("url", ""),
-                "dex_name": main_pair.get("dexId", "Unknown")
-            }
-    except Exception as e:
-        logger.error(f"Get token info error: {e}")
-        return None
-
 async def security_scan(contract_address):
     """Quick security scan"""
     checks = []
@@ -132,17 +93,14 @@ async def security_scan(contract_address):
     
     try:
         async with aiohttp.ClientSession() as session:
-            # Check 1: Honeypot
             hp_safe, hp_msg = await check_honeypot(session, contract_address)
             checks.append(hp_msg)
             if hp_safe: passed += 1
             
-            # Check 2: Liquidity (and get token info)
             liq_safe, liq_msg, pair_data = await check_liquidity_dex(session, contract_address)
             checks.append(liq_msg)
             if liq_safe: passed += 1
             
-            # Get full token info
             if pair_data:
                 token_info = {
                     "price": float(pair_data.get("priceUsd", 0)),
@@ -175,217 +133,92 @@ async def security_scan(contract_address):
         "token_info": token_info
     }
 
-# ===== X402 MESH API SCANNER =====
+# ===== X402 SCANNER =====
 async def scan_x402_trending():
     """Scan x402 Mesh API for trending tokens"""
-    opportunities = []
-    
     try:
         async with aiohttp.ClientSession() as session:
             logger.info("🔍 Querying x402 Trending API...")
             
-            # Try trending tokens endpoint with proper headers
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": "Mozilla/5.0",
                 "Accept": "application/json"
             }
             
             async with session.get(X402_TRENDING_API, headers=headers, timeout=20) as response:
                 if response.status == 404:
-                    logger.warning("x402 API endpoint not available (404) - This is OK, trying alternative...")
-                    # x402 API might not be public yet, continue with DexScreener only
+                    logger.warning("x402 API not available (404) - continuing with DexScreener only")
                     return []
                 
                 if response.status != 200:
                     logger.error(f"x402 API returned {response.status}")
                     return []
                 
-                # Try to parse response
-                try:
-                    data = await response.json()
-                except:
-                    # If JSON fails, try text
-                    text = await response.text()
-                    logger.info(f"x402 API response (text): {text[:500]}")
-                    
-                    # Try to extract contract addresses from text
-                    contract_pattern = re.compile(r'0x[a-fA-F0-9]{40}')
-                    contracts = list(set(contract_pattern.findall(text)))
-                    
-                    if contracts:
-                        logger.info(f"Found {len(contracts)} contracts in x402 response")
-                        data = {"contracts": contracts}
-                    else:
-                        return []
-                
-                # Process data
-                tokens_found = []
-                
-                # Handle different response formats
-                if isinstance(data, dict):
-                    # Format 1: {tokens: [...]}
-                    if "tokens" in data:
-                        tokens_found = data["tokens"]
-                    # Format 2: {contracts: [...]}
-                    elif "contracts" in data:
-                        tokens_found = [{"address": addr} for addr in data["contracts"]]
-                    # Format 3: {data: [...]}
-                    elif "data" in data:
-                        tokens_found = data["data"]
-                elif isinstance(data, list):
-                    tokens_found = data
-                
-                logger.info(f"Processing {len(tokens_found)} tokens from x402")
+                # API exists but might return empty - that's OK
                 scan_stats["x402_scans"] += 1
-                
-                # Process each token
-                for token in tokens_found[:10]:  # Limit to 10
-                    try:
-                        # Get contract address
-                        contract = None
-                        if isinstance(token, str):
-                            contract = token
-                        elif isinstance(token, dict):
-                            contract = token.get("address") or token.get("contract") or token.get("token_address")
-                        
-                        if not contract or not contract.startswith("0x"):
-                            continue
-                        
-                        # Validate and get token info from DexScreener
-                        token_info = await get_token_info_dex(session, contract)
-                        
-                        if not token_info:
-                            continue
-                        
-                        scan_stats["tokens_analyzed"] += 1
-                        
-                        # Filter criteria
-                        mcap = token_info.get("mcap", 0)
-                        liq = token_info.get("liquidity", 0)
-                        
-                        # Check if it's a potential gem
-                        is_microcap = 1000 < mcap < 1000000
-                        has_liquidity = liq > 5000
-                        
-                        if is_microcap and has_liquidity:
-                            # Calculate potential
-                            if mcap < 50000:
-                                potential = "1000-10000x 🚀🚀🚀"
-                            elif mcap < 100000:
-                                potential = "100-1000x 🚀🚀"
-                            elif mcap < 500000:
-                                potential = "10-100x 🚀"
-                            else:
-                                potential = "5-10x"
-                            
-                            opportunities.append({
-                                "name": token_info["name"],
-                                "symbol": token_info["symbol"],
-                                "contract": contract,
-                                "type": "x402_trending",
-                                "price": token_info["price"],
-                                "mcap": mcap,
-                                "liq": liq,
-                                "volume_24h": token_info.get("volume_24h", 0),
-                                "price_change_24h": token_info.get("price_change_24h", 0),
-                                "dex_url": token_info["dex_url"],
-                                "potential": potential,
-                                "source": "x402 Trending"
-                            })
-                            
-                            logger.info(f"✅ x402 gem found: {token_info['symbol']} - {potential}")
-                    
-                    except Exception as e:
-                        logger.error(f"Error processing x402 token: {e}")
-                        continue
-                
-                return opportunities
+                return []  # For now, focus on DexScreener
                 
     except Exception as e:
         logger.error(f"x402 API error: {e}")
         return []
 
 # ===== DEXSCREENER SCANNER =====
-async def scan_dexscreener_fallback(session):
-    """Fallback: Scan specific popular tokens on Base"""
-    try:
-        # Known Base chain DEX tokens to check
-        popular_base_tokens = [
-            "0x4200000000000000000000000000000000000006",  # WETH on Base
-            "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",  # DAI on Base  
-        ]
-        
-        opportunities = []
-        for token_address in popular_base_tokens[:5]:
-            try:
-                url = f"{DEXSCREENER_API}/tokens/{token_address}"
-                async with session.get(url, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        pairs = [p for p in data.get("pairs", []) if p.get("chainId") == "base"]
-                        # Process similar to main function
-                        if pairs:
-                            logger.info(f"Found {len(pairs)} pairs via fallback")
-                            return []  # Return empty for now to avoid spam
-            except:
-                continue
-        
-        return opportunities
-    except Exception as e:
-        logger.error(f"Fallback scan error: {e}")
-        return []
-
 async def scan_dexscreener_trending():
     """Scan DexScreener for trending Base chain tokens"""
-    buy_opportunities = []
-    
     try:
         async with aiohttp.ClientSession() as session:
             logger.info("🔍 Scanning DexScreener Base chain...")
             
-            # TRY METHOD 1: Search for Base chain tokens
+            # Method 1: Search for Base tokens
             try:
-                # Use search endpoint for Base chain
-                search_url = f"{DEXSCREENER_API}/search/?q=base"
-                
-                async with session.get(search_url, timeout=15) as response:
+                url = f"{DEXSCREENER_API}/search/?q=base"
+                async with session.get(url, timeout=15) as response:
                     if response.status == 200:
                         data = await response.json()
                         all_pairs = data.get("pairs", [])
-                        
-                        # Filter only Base chain
                         pairs = [p for p in all_pairs if p.get("chainId") == "base"]
                         
                         if pairs:
                             logger.info(f"Found {len(pairs)} Base pairs via search")
-                            return await process_dex_pairs(pairs, session)
+                            return await process_dex_pairs(pairs)
             except Exception as e:
                 logger.error(f"Search method failed: {e}")
             
-            # TRY METHOD 2: Direct pairs endpoint
-            try:
-                pairs_url = DEXSCREENER_BASE_URL
-                
-                async with session.get(pairs_url, timeout=15) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        pairs = data.get("pairs", [])
-                        
-                        if pairs:
-                            logger.info(f"Found {len(pairs)} Base pairs via direct")
-                            return await process_dex_pairs(pairs, session)
-            except Exception as e:
-                logger.error(f"Direct method failed: {e}")
-            
-            # TRY METHOD 3: Specific popular tokens
-            logger.warning("Both methods failed, using token scan...")
-            return await scan_specific_base_tokens(session)
+            # Method 2: Check known Base tokens
+            logger.info("Using fallback token scan...")
+            return await scan_known_base_tokens(session)
             
     except Exception as e:
         logger.error(f"DexScreener error: {e}")
         return []
 
-async def process_dex_pairs(pairs, session):
+async def scan_known_base_tokens(session):
+    """Scan known Base tokens as fallback"""
+    try:
+        # Known active Base tokens
+        test_tokens = [
+            "0x4200000000000000000000000000000000000006",  # WETH
+        ]
+        
+        for token in test_tokens:
+            try:
+                url = f"{DEXSCREENER_API}/tokens/{token}"
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        pairs = [p for p in data.get("pairs", []) if p.get("chainId") == "base"]
+                        if pairs:
+                            logger.info(f"Found {len(pairs)} pairs via token scan")
+                            return await process_dex_pairs(pairs[:30])
+            except:
+                continue
+        
+        return []
+    except Exception as e:
+        logger.error(f"Token scan error: {e}")
+        return []
+
+async def process_dex_pairs(pairs):
     """Process DexScreener pairs"""
     buy_opportunities = []
     
@@ -395,78 +228,74 @@ async def process_dex_pairs(pairs, session):
         now = datetime.now().timestamp() * 1000
         day_ago = now - (24 * 60 * 60 * 1000)
         
-        for pair in pairs[:30]:  # Top 30
+        for pair in pairs[:30]:
             try:
                 mcap = float(pair.get("marketCap", 0))
                 liq = float(pair.get("liquidity", {}).get("usd", 0))
                 vol_24h = float(pair.get("volume", {}).get("h24", 0))
                 price_change = float(pair.get("priceChange", {}).get("h24", 0))
                 created_at = pair.get("pairCreatedAt", 0)
-                        
-                        # Filters
-                        is_new = created_at > day_ago
-                        is_microcap = 1000 < mcap < 500000
-                        has_liquidity = liq > 10000
-                        has_volume = vol_24h > 5000
-                        is_pumping = price_change > 30
-                        
-                        if (is_new or is_microcap) and has_liquidity and (has_volume or is_pumping):
-                            contract = pair.get("baseToken", {}).get("address", "")
-                            
-                            if not contract:
-                                continue
-                            
-                            scan_stats["tokens_analyzed"] += 1
-                            
-                            # Potential
-                            if mcap < 50000:
-                                potential = "1000-10000x 🚀🚀🚀"
-                            elif mcap < 100000:
-                                potential = "100-1000x 🚀🚀"
-                            elif mcap < 500000:
-                                potential = "10-100x 🚀"
-                            else:
-                                potential = "5-10x"
-                            
-                            # Age
-                            age_hours = (now - created_at) / (1000 * 60 * 60)
-                            age_str = f"{age_hours:.1f}h" if age_hours < 24 else f"{age_hours/24:.1f}d"
-                            
-                            buy_opportunities.append({
-                                "name": pair.get("baseToken", {}).get("name", "Unknown"),
-                                "symbol": pair.get("baseToken", {}).get("symbol", "???"),
-                                "contract": contract,
-                                "type": "dex_trending",
-                                "price": float(pair.get("priceUsd", 0)),
-                                "mcap": mcap,
-                                "liq": liq,
-                                "volume_24h": vol_24h,
-                                "price_change_24h": price_change,
-                                "dex_url": pair.get("url", ""),
-                                "potential": potential,
-                                "age": age_str,
-                                "is_new": is_new,
-                                "source": "DexScreener"
-                            })
-                            
-                            logger.info(f"✅ Dex gem found: {pair.get('baseToken', {}).get('symbol')} - {potential}")
+                
+                is_new = created_at > day_ago
+                is_microcap = 1000 < mcap < 500000
+                has_liquidity = liq > 10000
+                has_volume = vol_24h > 5000
+                is_pumping = price_change > 30
+                
+                if (is_new or is_microcap) and has_liquidity and (has_volume or is_pumping):
+                    contract = pair.get("baseToken", {}).get("address", "")
                     
-                    except Exception as e:
-                        logger.error(f"Error processing pair: {e}")
+                    if not contract:
                         continue
-                
-                buy_opportunities.sort(key=lambda x: x['mcap'])
-                return buy_opportunities[:10]
-                
+                    
+                    scan_stats["tokens_analyzed"] += 1
+                    
+                    if mcap < 50000:
+                        potential = "1000-10000x 🚀🚀🚀"
+                    elif mcap < 100000:
+                        potential = "100-1000x 🚀🚀"
+                    elif mcap < 500000:
+                        potential = "10-100x 🚀"
+                    else:
+                        potential = "5-10x"
+                    
+                    age_hours = (now - created_at) / (1000 * 60 * 60)
+                    age_str = f"{age_hours:.1f}h" if age_hours < 24 else f"{age_hours/24:.1f}d"
+                    
+                    buy_opportunities.append({
+                        "name": pair.get("baseToken", {}).get("name", "Unknown"),
+                        "symbol": pair.get("baseToken", {}).get("symbol", "???"),
+                        "contract": contract,
+                        "type": "dex_trending",
+                        "price": float(pair.get("priceUsd", 0)),
+                        "mcap": mcap,
+                        "liq": liq,
+                        "volume_24h": vol_24h,
+                        "price_change_24h": price_change,
+                        "dex_url": pair.get("url", ""),
+                        "potential": potential,
+                        "age": age_str,
+                        "is_new": is_new,
+                        "source": "DexScreener"
+                    })
+                    
+                    logger.info(f"✅ Gem found: {pair.get('baseToken', {}).get('symbol')} - {potential}")
+            
+            except Exception as e:
+                logger.error(f"Error processing pair: {e}")
+                continue
+        
+        buy_opportunities.sort(key=lambda x: x['mcap'])
+        return buy_opportunities[:10]
+    
     except Exception as e:
-        logger.error(f"DexScreener error: {e}")
+        logger.error(f"Process pairs error: {e}")
         return []
 
 # ===== TELEGRAM ALERTS =====
 async def send_opportunity_alert(bot, token, security, source="Unknown"):
     """Universal alert for any opportunity"""
     
-    # Fire emoji based on potential
     if "10000x" in token.get('potential', ''):
         fire = "🔥🔥🔥🔥"
     elif "1000x" in token.get('potential', ''):
@@ -477,13 +306,12 @@ async def send_opportunity_alert(bot, token, security, source="Unknown"):
         fire = "🔥"
     
     new_badge = " 🆕 JUST LAUNCHED!" if token.get('is_new', False) else ""
-    source_badge = f"📡 **Source: {source}**"
     
     msg = f"""
 {fire} **GEM ALERT!**{new_badge} {fire}
 
 💎 **{token['name']} (${token['symbol']})**
-{source_badge}
+📡 Source: {source}
 
 📊 **STATS:**
 💰 Price: ${token['price']:.8f}
@@ -536,7 +364,7 @@ NOT financial advice!
 
 # ===== MAIN SCAN LOOP =====
 async def auto_scan_loop(bot):
-    """ULTIMATE scanning loop - Triple scanner"""
+    """ULTIMATE scanning loop"""
     global scanned_tokens, last_scan_time
     scan_number = 0
     
@@ -547,8 +375,7 @@ async def auto_scan_loop(bot):
             chat_id=TELEGRAM_CHAT_ID,
             text=(
                 "🔥 **ULTIMATE SCANNER ONLINE!** 🔥\n\n"
-                "Triple scanning active:\n"
-                "✅ x402 Mesh API\n"
+                "Scanning:\n"
                 "✅ DexScreener Base\n"
                 "✅ Security checks\n\n"
                 "Alerts coming soon! 🚀"
@@ -562,57 +389,47 @@ async def auto_scan_loop(bot):
         try:
             scan_number += 1
             logger.info(f"\n{'='*50}")
-            logger.info(f"[SCAN #{scan_number}] STARTING TRIPLE SCAN")
+            logger.info(f"[SCAN #{scan_number}] STARTING SCAN")
             logger.info(f"{'='*50}")
             
             all_opportunities = []
             
-            # === SCAN 1: x402 Mesh API ===
+            # Scan x402 (might be empty)
             logger.info("📡 [1/2] Scanning x402 Mesh API...")
             x402_tokens = await scan_x402_trending()
             logger.info(f"✅ x402: Found {len(x402_tokens)} opportunities")
             all_opportunities.extend(x402_tokens)
             
-            # === SCAN 2: DexScreener ===
+            # Scan DexScreener
             logger.info("📊 [2/2] Scanning DexScreener...")
             dex_tokens = await scan_dexscreener_trending()
             logger.info(f"✅ DexScreener: Found {len(dex_tokens)} opportunities")
             all_opportunities.extend(dex_tokens)
             
-            # === PROCESS ALL OPPORTUNITIES ===
             logger.info(f"\n🔍 Processing {len(all_opportunities)} total opportunities...")
             
             for token in all_opportunities:
                 token_id = f"{token['type']}_{token['contract']}"
                 
-                # Rate limiting
                 last_alert = last_scan_time.get(token_id, 0)
                 now = datetime.now().timestamp()
                 
-                if now - last_alert < 3600:  # 1 hour cooldown
+                if now - last_alert < 3600:
                     continue
                 
                 if token_id not in scanned_tokens or (now - last_alert) > 3600:
                     logger.info(f"🆕 New opportunity: {token['name']} from {token.get('source', 'Unknown')}")
                     
-                    # Security scan
                     security = await security_scan(token['contract'])
                     
-                    # Send if score >= 50%
                     if security['score'] >= 50:
-                        await send_opportunity_alert(
-                            bot, 
-                            token, 
-                            security, 
-                            source=token.get('source', 'Unknown')
-                        )
+                        await send_opportunity_alert(bot, token, security, source=token.get('source', 'Unknown'))
                         scanned_tokens.add(token_id)
                         last_scan_time[token_id] = now
-                        await asyncio.sleep(3)  # Cooldown between alerts
+                        await asyncio.sleep(3)
                     else:
                         logger.info(f"❌ Rejected: {token['name']} (security: {security['score']:.0f}%)")
             
-            # Cleanup
             if len(scanned_tokens) > 1000:
                 scanned_tokens = set(list(scanned_tokens)[-500:])
             
@@ -627,7 +444,7 @@ async def auto_scan_loop(bot):
             logger.info(f"⏰ Next scan in 5 minutes...")
             logger.info(f"{'='*50}\n")
             
-            await asyncio.sleep(300)  # 5 minutes
+            await asyncio.sleep(300)
             
         except Exception as e:
             logger.error(f"❌ Scan loop error: {e}")
@@ -635,88 +452,62 @@ async def auto_scan_loop(bot):
 
 # ===== BOT COMMANDS =====
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command"""
     global bot_started
     
     if not bot_started:
         bot_started = True
-        
         await update.message.reply_text(
-            "🔥 **ULTIMATE X402 SCANNER!** 🔥\n\n"
-            "✅ Triple scanning active:\n"
-            "• x402 Mesh API ✅\n"
-            "• DexScreener Base ✅\n"
-            "• Security checks ✅\n\n"
-            "📲 **You'll get alerts for:**\n"
-            "💎 Trending x402 tokens\n"
+            "🔥 **X402 SCANNER ACTIVE!** 🔥\n\n"
+            "✅ DexScreener Base: ACTIVE\n"
+            "✅ Security checks: ACTIVE\n\n"
+            "📲 Alerts for:\n"
             "💎 Microcap gems (<$500k)\n"
             "💎 New launches (<24h)\n"
             "💎 High volume tokens\n\n"
-            "🛡️ **Every token is security checked!**\n\n"
             "⚡ Scanner is now ACTIVE 24/7!\n"
             "Use /status for stats 📊",
             parse_mode='Markdown'
         )
     else:
-        await update.message.reply_text(
-            "✅ Scanner already active!\nUse /status for stats.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("✅ Scanner already active!\nUse /status.", parse_mode='Markdown')
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Status command"""
-    x402_count = len([t for t in scanned_tokens if t.startswith("x402")])
-    dex_count = len([t for t in scanned_tokens if t.startswith("dex")])
-    
     await update.message.reply_text(
         f"📊 **SCANNER STATUS**\n\n"
         f"✅ Status: **ONLINE**\n"
         f"⏰ {datetime.now().strftime('%H:%M:%S UTC')}\n\n"
-        f"📈 **Lifetime Stats:**\n"
-        f"🔔 Alerts sent: {scan_stats['alerts_sent']}\n"
-        f"📡 x402 scans: {scan_stats['x402_scans']}\n"
+        f"📈 **Stats:**\n"
+        f"🔔 Alerts: {scan_stats['alerts_sent']}\n"
         f"📊 Dex scans: {scan_stats['dex_scans']}\n"
-        f"🔍 Tokens analyzed: {scan_stats['tokens_analyzed']}\n\n"
-        f"📊 **Tracked:**\n"
-        f"📡 x402 tokens: {x402_count}\n"
-        f"📊 Dex tokens: {dex_count}\n"
-        f"💎 Total: {len(scanned_tokens)}\n\n"
-        f"🔄 Scan every 5 min\n"
+        f"🔍 Analyzed: {scan_stats['tokens_analyzed']}\n"
+        f"💎 Tracked: {len(scanned_tokens)}\n\n"
         f"Bot working 24/7! 🚀",
         parse_mode='Markdown'
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detailed stats"""
     cutoff = datetime.now().timestamp() - (6 * 3600)
     recent = len([v for v in last_scan_time.values() if v > cutoff])
     
     await update.message.reply_text(
-        f"📈 **DETAILED STATISTICS**\n\n"
+        f"📈 **STATISTICS**\n\n"
         f"**Lifetime:**\n"
-        f"🔔 Total alerts: {scan_stats['alerts_sent']}\n"
-        f"🔍 Tokens analyzed: {scan_stats['tokens_analyzed']}\n"
-        f"📡 x402 API calls: {scan_stats['x402_scans']}\n"
-        f"📊 Dex API calls: {scan_stats['dex_scans']}\n\n"
+        f"🔔 Alerts: {scan_stats['alerts_sent']}\n"
+        f"🔍 Analyzed: {scan_stats['tokens_analyzed']}\n"
+        f"📊 Scans: {scan_stats['dex_scans']}\n\n"
         f"**Recent (6h):**\n"
         f"🔔 Alerts: {recent}\n\n"
-        f"**Health:**\n"
-        f"✅ x402 Mesh: Online\n"
-        f"✅ DexScreener: Online\n"
-        f"✅ Security: Active\n\n"
         f"Keep watching! 👀",
         parse_mode='Markdown'
     )
 
 # ===== MAIN =====
 async def main():
-    """Main function"""
-    
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.error("❌ Missing credentials!")
         return
     
-    logger.info("🚀 Starting ULTIMATE X402 Scanner...")
+    logger.info("🚀 Starting X402 Scanner...")
     
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
@@ -731,14 +522,7 @@ async def main():
     try:
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text=(
-                "🟢 **ULTIMATE SCANNER DEPLOYED**\n\n"
-                "Triple scanning ready:\n"
-                "✅ x402 Mesh API\n"
-                "✅ DexScreener\n"
-                "✅ Security checks\n\n"
-                "Send /start to activate! 🚀"
-            ),
+            text="🟢 **SCANNER DEPLOYED**\n\nSend /start to activate! 🚀",
             parse_mode='Markdown'
         )
     except Exception as e:
