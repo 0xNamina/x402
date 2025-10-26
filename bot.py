@@ -184,8 +184,18 @@ async def scan_x402_trending():
         async with aiohttp.ClientSession() as session:
             logger.info("🔍 Querying x402 Trending API...")
             
-            # Try trending tokens endpoint
-            async with session.get(X402_TRENDING_API, timeout=20) as response:
+            # Try trending tokens endpoint with proper headers
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json"
+            }
+            
+            async with session.get(X402_TRENDING_API, headers=headers, timeout=20) as response:
+                if response.status == 404:
+                    logger.warning("x402 API endpoint not available (404) - This is OK, trying alternative...")
+                    # x402 API might not be public yet, continue with DexScreener only
+                    return []
+                
                 if response.status != 200:
                     logger.error(f"x402 API returned {response.status}")
                     return []
@@ -296,6 +306,35 @@ async def scan_x402_trending():
         return []
 
 # ===== DEXSCREENER SCANNER =====
+async def scan_dexscreener_fallback(session):
+    """Fallback: Scan specific popular tokens on Base"""
+    try:
+        # Known Base chain DEX tokens to check
+        popular_base_tokens = [
+            "0x4200000000000000000000000000000000000006",  # WETH on Base
+            "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb",  # DAI on Base  
+        ]
+        
+        opportunities = []
+        for token_address in popular_base_tokens[:5]:
+            try:
+                url = f"{DEXSCREENER_API}/tokens/{token_address}"
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        pairs = [p for p in data.get("pairs", []) if p.get("chainId") == "base"]
+                        # Process similar to main function
+                        if pairs:
+                            logger.info(f"Found {len(pairs)} pairs via fallback")
+                            return []  # Return empty for now to avoid spam
+            except:
+                continue
+        
+        return opportunities
+    except Exception as e:
+        logger.error(f"Fallback scan error: {e}")
+        return []
+
 async def scan_dexscreener_trending():
     """Scan DexScreener for trending Base chain tokens"""
     buy_opportunities = []
@@ -304,30 +343,65 @@ async def scan_dexscreener_trending():
         async with aiohttp.ClientSession() as session:
             logger.info("🔍 Scanning DexScreener Base chain...")
             
-            # Get pairs on Base
-            url = f"{DEXSCREENER_API}/pairs/base"
+            # TRY METHOD 1: Search for Base chain tokens
+            try:
+                # Use search endpoint for Base chain
+                search_url = f"{DEXSCREENER_API}/search/?q=base"
+                
+                async with session.get(search_url, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        all_pairs = data.get("pairs", [])
+                        
+                        # Filter only Base chain
+                        pairs = [p for p in all_pairs if p.get("chainId") == "base"]
+                        
+                        if pairs:
+                            logger.info(f"Found {len(pairs)} Base pairs via search")
+                            return await process_dex_pairs(pairs, session)
+            except Exception as e:
+                logger.error(f"Search method failed: {e}")
             
-            async with session.get(url, timeout=15) as response:
-                if response.status != 200:
-                    logger.error(f"DexScreener returned {response.status}")
-                    return []
+            # TRY METHOD 2: Direct pairs endpoint
+            try:
+                pairs_url = DEXSCREENER_BASE_URL
                 
-                data = await response.json()
-                pairs = data.get("pairs", [])
-                
-                logger.info(f"Processing {len(pairs)} Base pairs")
-                scan_stats["dex_scans"] += 1
-                
-                now = datetime.now().timestamp() * 1000
-                day_ago = now - (24 * 60 * 60 * 1000)
-                
-                for pair in pairs[:30]:  # Top 30
-                    try:
-                        mcap = float(pair.get("marketCap", 0))
-                        liq = float(pair.get("liquidity", {}).get("usd", 0))
-                        vol_24h = float(pair.get("volume", {}).get("h24", 0))
-                        price_change = float(pair.get("priceChange", {}).get("h24", 0))
-                        created_at = pair.get("pairCreatedAt", 0)
+                async with session.get(pairs_url, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        pairs = data.get("pairs", [])
+                        
+                        if pairs:
+                            logger.info(f"Found {len(pairs)} Base pairs via direct")
+                            return await process_dex_pairs(pairs, session)
+            except Exception as e:
+                logger.error(f"Direct method failed: {e}")
+            
+            # TRY METHOD 3: Specific popular tokens
+            logger.warning("Both methods failed, using token scan...")
+            return await scan_specific_base_tokens(session)
+            
+    except Exception as e:
+        logger.error(f"DexScreener error: {e}")
+        return []
+
+async def process_dex_pairs(pairs, session):
+    """Process DexScreener pairs"""
+    buy_opportunities = []
+    
+    try:
+        scan_stats["dex_scans"] += 1
+        
+        now = datetime.now().timestamp() * 1000
+        day_ago = now - (24 * 60 * 60 * 1000)
+        
+        for pair in pairs[:30]:  # Top 30
+            try:
+                mcap = float(pair.get("marketCap", 0))
+                liq = float(pair.get("liquidity", {}).get("usd", 0))
+                vol_24h = float(pair.get("volume", {}).get("h24", 0))
+                price_change = float(pair.get("priceChange", {}).get("h24", 0))
+                created_at = pair.get("pairCreatedAt", 0)
                         
                         # Filters
                         is_new = created_at > day_ago
