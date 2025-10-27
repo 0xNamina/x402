@@ -1,4 +1,11 @@
-"""
+async def send_opportunity_alert(bot, token, security, source="Unknown"):
+    """Universal alert with PRIORITY badge"""
+    
+    if "10000x" in token.get('potential', ''):
+        fire = "🔥🔥🔥🔥"
+    elif "1000x" in token.get('potential', ''):
+        fire = "🔥🔥🔥"
+    elif "100x" in"""
 X402 Token Scanner Bot - ULTIMATE VERSION (FIXED)
 Triple Scanner: x402 Mesh API + DexScreener + Security
 """
@@ -164,62 +171,97 @@ async def scan_x402_trending():
 
 # ===== DEXSCREENER SCANNER =====
 async def scan_dexscreener_trending():
-    """Scan DexScreener for trending Base chain tokens"""
+    """Scan DexScreener for NEW Base chain tokens"""
     try:
         async with aiohttp.ClientSession() as session:
-            logger.info("🔍 Scanning DexScreener Base chain...")
+            logger.info("🔍 Scanning DexScreener for NEW Base tokens...")
             
-            # Method 1: Search for Base tokens
-            try:
-                url = f"{DEXSCREENER_API}/search/?q=base"
-                async with session.get(url, timeout=15) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        all_pairs = data.get("pairs", [])
-                        pairs = [p for p in all_pairs if p.get("chainId") == "base"]
+            # UPDATED: Search for newest tokens on Base
+            search_queries = [
+                "base",  # General Base search
+            ]
+            
+            all_found_pairs = []
+            
+            for query in search_queries:
+                try:
+                    url = f"{DEXSCREENER_API}/search/?q={query}"
+                    logger.info(f"Searching: {query}")
+                    
+                    async with session.get(url, timeout=15) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            all_pairs = data.get("pairs", [])
+                            
+                            # Filter ONLY Base chain
+                            base_pairs = [p for p in all_pairs if p.get("chainId") == "base"]
+                            
+                            if base_pairs:
+                                logger.info(f"Found {len(base_pairs)} Base pairs from search '{query}'")
+                                all_found_pairs.extend(base_pairs)
+                                
+                        await asyncio.sleep(1)  # Rate limit
                         
-                        if pairs:
-                            logger.info(f"Found {len(pairs)} Base pairs via search")
-                            return await process_dex_pairs(pairs)
-            except Exception as e:
-                logger.error(f"Search method failed: {e}")
+                except Exception as e:
+                    logger.error(f"Search '{query}' failed: {e}")
+                    continue
             
-            # Method 2: Check known Base tokens
-            logger.info("Using fallback token scan...")
-            return await scan_known_base_tokens(session)
+            if all_found_pairs:
+                # Remove duplicates
+                unique_pairs = {p.get("pairAddress"): p for p in all_found_pairs}.values()
+                logger.info(f"Total unique pairs found: {len(unique_pairs)}")
+                return await process_dex_pairs(list(unique_pairs))
+            
+            # If search fails, try getting latest Base pairs differently
+            logger.warning("Search returned no results, trying alternative method...")
+            return await scan_latest_base_pairs(session)
             
     except Exception as e:
         logger.error(f"DexScreener error: {e}")
         return []
 
-async def scan_known_base_tokens(session):
-    """Scan known Base tokens as fallback"""
+async def scan_latest_base_pairs(session):
+    """Alternative: Scan for latest activity on Base"""
     try:
-        # Known active Base tokens
-        test_tokens = [
-            "0x4200000000000000000000000000000000000006",  # WETH
+        logger.info("Trying to get latest Base activity...")
+        
+        # Try to get any Base token info as starting point
+        # Then find related new pairs
+        known_base_dexes = [
+            "uniswap",
+            "aerodrome", 
+            "baseswap"
         ]
         
-        for token in test_tokens:
+        # Search for each DEX on Base
+        all_pairs = []
+        for dex in known_base_dexes:
             try:
-                url = f"{DEXSCREENER_API}/tokens/{token}"
+                url = f"{DEXSCREENER_API}/search/?q={dex}+base"
                 async with session.get(url, timeout=10) as response:
                     if response.status == 200:
                         data = await response.json()
                         pairs = [p for p in data.get("pairs", []) if p.get("chainId") == "base"]
                         if pairs:
-                            logger.info(f"Found {len(pairs)} pairs via token scan")
-                            return await process_dex_pairs(pairs[:30])
+                            logger.info(f"Found {len(pairs)} pairs on {dex}")
+                            all_pairs.extend(pairs[:20])  # Take top 20 from each
+                            
+                await asyncio.sleep(1)
             except:
                 continue
         
+        if all_pairs:
+            unique_pairs = {p.get("pairAddress"): p for p in all_pairs}.values()
+            return await process_dex_pairs(list(unique_pairs))
+        
         return []
+        
     except Exception as e:
-        logger.error(f"Token scan error: {e}")
+        logger.error(f"Latest pairs scan error: {e}")
         return []
 
 async def process_dex_pairs(pairs):
-    """Process DexScreener pairs"""
+    """Process DexScreener pairs - UPDATED FOR EARLY GEMS"""
     buy_opportunities = []
     
     try:
@@ -227,8 +269,11 @@ async def process_dex_pairs(pairs):
         
         now = datetime.now().timestamp() * 1000
         day_ago = now - (24 * 60 * 60 * 1000)
+        week_ago = now - (7 * 24 * 60 * 60 * 1000)
         
-        for pair in pairs[:30]:
+        logger.info(f"Processing {len(pairs)} pairs...")
+        
+        for pair in pairs:
             try:
                 mcap = float(pair.get("marketCap", 0))
                 liq = float(pair.get("liquidity", {}).get("usd", 0))
@@ -236,57 +281,91 @@ async def process_dex_pairs(pairs):
                 price_change = float(pair.get("priceChange", {}).get("h24", 0))
                 created_at = pair.get("pairCreatedAt", 0)
                 
-                is_new = created_at > day_ago
-                is_microcap = 1000 < mcap < 500000
-                has_liquidity = liq > 10000
-                has_volume = vol_24h > 5000
-                is_pumping = price_change > 30
+                # RELAXED FILTERS FOR EARLY GEMS
+                is_very_new = created_at > day_ago  # <24h
+                is_new = created_at > week_ago  # <7d
+                is_microcap = 100 < mcap < 1000000  # $100 - $1M (wider range)
+                has_min_liquidity = liq > 2000  # LOWERED: >$2k (was $10k)
+                has_some_volume = vol_24h > 1000  # LOWERED: >$1k (was $5k)
+                is_pumping = price_change > 20  # LOWERED: >20% (was 30%)
                 
-                if (is_new or is_microcap) and has_liquidity and (has_volume or is_pumping):
-                    contract = pair.get("baseToken", {}).get("address", "")
-                    
-                    if not contract:
-                        continue
-                    
-                    scan_stats["tokens_analyzed"] += 1
-                    
-                    if mcap < 50000:
-                        potential = "1000-10000x 🚀🚀🚀"
-                    elif mcap < 100000:
-                        potential = "100-1000x 🚀🚀"
-                    elif mcap < 500000:
-                        potential = "10-100x 🚀"
-                    else:
-                        potential = "5-10x"
-                    
-                    age_hours = (now - created_at) / (1000 * 60 * 60)
-                    age_str = f"{age_hours:.1f}h" if age_hours < 24 else f"{age_hours/24:.1f}d"
-                    
-                    buy_opportunities.append({
-                        "name": pair.get("baseToken", {}).get("name", "Unknown"),
-                        "symbol": pair.get("baseToken", {}).get("symbol", "???"),
-                        "contract": contract,
-                        "type": "dex_trending",
-                        "price": float(pair.get("priceUsd", 0)),
-                        "mcap": mcap,
-                        "liq": liq,
-                        "volume_24h": vol_24h,
-                        "price_change_24h": price_change,
-                        "dex_url": pair.get("url", ""),
-                        "potential": potential,
-                        "age": age_str,
-                        "is_new": is_new,
-                        "source": "DexScreener"
-                    })
-                    
-                    logger.info(f"✅ Gem found: {pair.get('baseToken', {}).get('symbol')} - {potential}")
+                # PRIORITY 1: Very new + has liquidity
+                # PRIORITY 2: Microcap + volume
+                # PRIORITY 3: Pumping
+                qualifies = False
+                priority = "NORMAL"
+                
+                if is_very_new and has_min_liquidity:
+                    qualifies = True
+                    priority = "🆕 NEW LAUNCH"
+                elif is_microcap and has_min_liquidity and (has_some_volume or is_pumping):
+                    qualifies = True
+                    priority = "💎 MICROCAP"
+                elif is_pumping and has_min_liquidity:
+                    qualifies = True
+                    priority = "🚀 PUMPING"
+                
+                if not qualifies:
+                    continue
+                
+                contract = pair.get("baseToken", {}).get("address", "")
+                if not contract:
+                    continue
+                
+                scan_stats["tokens_analyzed"] += 1
+                
+                # Calculate potential based on market cap
+                if mcap < 10000:
+                    potential = "10000x+ 🚀🚀🚀🚀"
+                elif mcap < 50000:
+                    potential = "1000-10000x 🚀🚀🚀"
+                elif mcap < 100000:
+                    potential = "100-1000x 🚀🚀"
+                elif mcap < 500000:
+                    potential = "10-100x 🚀"
+                else:
+                    potential = "5-10x"
+                
+                # Calculate age
+                age_hours = (now - created_at) / (1000 * 60 * 60)
+                if age_hours < 1:
+                    age_str = f"{age_hours*60:.0f}m ago 🔥"
+                elif age_hours < 24:
+                    age_str = f"{age_hours:.1f}h ago"
+                else:
+                    age_str = f"{age_hours/24:.1f}d ago"
+                
+                buy_opportunities.append({
+                    "name": pair.get("baseToken", {}).get("name", "Unknown"),
+                    "symbol": pair.get("baseToken", {}).get("symbol", "???"),
+                    "contract": contract,
+                    "type": "dex_trending",
+                    "price": float(pair.get("priceUsd", 0)),
+                    "mcap": mcap,
+                    "liq": liq,
+                    "volume_24h": vol_24h,
+                    "price_change_24h": price_change,
+                    "dex_url": pair.get("url", ""),
+                    "potential": potential,
+                    "age": age_str,
+                    "is_new": is_very_new,
+                    "priority": priority,
+                    "source": "DexScreener"
+                })
+                
+                logger.info(f"✅ {priority}: {pair.get('baseToken', {}).get('symbol')} - {potential} (${mcap:,.0f})")
             
             except Exception as e:
                 logger.error(f"Error processing pair: {e}")
                 continue
         
-        buy_opportunities.sort(key=lambda x: x['mcap'])
-        return buy_opportunities[:10]
+        # Sort by: New first, then by market cap
+        buy_opportunities.sort(key=lambda x: (
+            0 if x['is_new'] else 1,  # New tokens first
+            x['mcap']  # Then by market cap (smallest first)
+        ))
+        
+        return buy_opportunities[:15]  # Return top 15 (was 10)
     
     except Exception as e:
         logger.error(f"Process pairs error: {e}")
@@ -294,7 +373,7 @@ async def process_dex_pairs(pairs):
 
 # ===== TELEGRAM ALERTS =====
 async def send_opportunity_alert(bot, token, security, source="Unknown"):
-    """Universal alert for any opportunity"""
+    """Enhanced alert with priority and more info"""
     
     if "10000x" in token.get('potential', ''):
         fire = "🔥🔥🔥🔥"
@@ -305,20 +384,22 @@ async def send_opportunity_alert(bot, token, security, source="Unknown"):
     else:
         fire = "🔥"
     
+    # Priority badge
+    priority = token.get('priority', 'NORMAL')
     new_badge = " 🆕 JUST LAUNCHED!" if token.get('is_new', False) else ""
     
     msg = f"""
-{fire} **GEM ALERT!**{new_badge} {fire}
+{fire} **{priority}**{new_badge} {fire}
 
 💎 **{token['name']} (${token['symbol']})**
 📡 Source: {source}
 
 📊 **STATS:**
-💰 Price: ${token['price']:.8f}
+💰 Price: ${token['price']:.10f}
 📈 24h: {token.get('price_change_24h', 0):+.1f}%
 💵 MCap: ${token['mcap']:,.0f}
 💧 Liq: ${token['liq']:,.0f}
-📊 Vol: ${token.get('volume_24h', 0):,.0f}
+📊 Vol 24h: ${token.get('volume_24h', 0):,.0f}
 ⏰ Age: {token.get('age', 'N/A')}
 
 🚀 **POTENTIAL: {token.get('potential', 'High')}**
@@ -342,10 +423,12 @@ async def send_opportunity_alert(bot, token, security, source="Unknown"):
 📊 DexScreener: https://dexscreener.com/base/{token['contract']}
 
 ⚠️ **EXTREME RISK WARNING:**
-• Microcap = High volatility!
-• Can 1000x or go to $0
-• Only invest what you can LOSE
-• Always DYOR!
+• VERY early stage token!
+• Can 1000x or rug to $0
+• Only invest <1% of portfolio
+• Set stop loss immediately
+• Take profits gradually
+• ALWAYS DYOR!
 
 NOT financial advice!
 """
@@ -357,7 +440,7 @@ NOT financial advice!
             parse_mode='Markdown',
             disable_web_page_preview=True
         )
-        logger.info(f"✅ Alert sent: {token['name']} from {source}")
+        logger.info(f"✅ Alert sent: {token['name']} ({priority}) from {source}")
         scan_stats["alerts_sent"] += 1
     except Exception as e:
         logger.error(f"Error sending alert: {e}")
